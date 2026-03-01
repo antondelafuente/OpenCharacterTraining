@@ -1,0 +1,7 @@
+# Copy this file to constants.py and update the paths for your machine.
+# constants.py is gitignored — it won't be committed.
+
+DATA_PATH = "/path/to/OpenCharacterTraining/data"
+MODEL_PATH = "/path/to/local/models"
+LORA_PATH = "/path/to/local/loras"
+CONSTITUTION_PATH = "/path/to/OpenCharacterTraining/constitutions"

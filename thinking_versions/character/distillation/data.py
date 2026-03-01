@@ -65,7 +65,7 @@ for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it", "qwen3-4b", 
         data["c_length"] = data["c_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["r_length"] = data["r_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["max_length"] = data[["c_length", "r_length"]].max(axis=1)
-        max_len = 4096 if model.startswith("qwen3") else 1024
+        max_len = 8192 if model.startswith("qwen3") else 1024
         data = data[data["max_length"] <= max_len]
         data = data[["chosen", "rejected"]]
 

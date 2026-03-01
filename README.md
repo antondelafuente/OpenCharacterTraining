@@ -174,11 +174,23 @@ The steps are the same as standard OCT. Use `gen_prompts_api.py` / `teacher_api.
 
 ### Gotchas
 
+**Training:**
 - **`--length_normalize` in DPO is mandatory** — without it, the model learns length patterns instead of persona. This is the #1 bug.
-- **vLLM sometimes drops the opening `<think>` tag** — `data.py` detects and fixes this automatically.
+- **LoRA merge is broken for thinking models** — merging DPO + SFT LoRAs (linear or SVD) destroys `<think>`/`</think>` coordination, producing broken or unclosed think blocks. Instead: fold the DPO LoRA into base weights, train SFT on the folded model, and serve with the SFT LoRA directly via vLLM's `--enable-lora`.
+- **DPO converges fast** — in practice, DPO can plateau by step ~450 of ~2200. Signs: loss well below 0.693, reward gap stops growing, KL stabilizes. If loss/gap/KL are flat for 200+ steps, training is done. Use `--eval_steps 25 --save_steps 25` so you have a checkpoint near the convergence point. Consider early stopping.
+- **DPO GPU sizing** — DPO loads both policy and reference model simultaneously. Budget accordingly. On a 48GB GPU, use `--ref_offload` and `--micro_train_batch_size 2`. 80GB+ is more comfortable.
+- **Use `--bf16`** (not `--param_dtype bf16`) — the newer OpenRLHF syntax.
+- **Ninja must be on PATH** for deepspeed JIT compilation — `export PATH=~/bin:$PATH` or wherever ninja is installed.
+
+**Generation:**
 - **`enable_thinking=True`** must be set in chat template kwargs for Qwen3 models.
 - **Do NOT use `repetition_penalty` with Qwen3** — it causes degeneration.
-- **GPU memory**: use `gpu_memory_utilization=0.80` (not 0.95) to leave headroom for long think block sequences.
+- **vLLM >= 0.15.1 dropped the `task` parameter** — remove `"task": "generate"` from any `LLM()` constructor calls if you're on a newer version. The scripts in this fork already have this fix.
+- **vLLM sometimes drops the opening `<think>` tag** — `data.py` detects and fixes this automatically.
+- **GPU memory**: use `gpu_memory_utilization=0.80` (not 0.95) to leave headroom for KV cache with long think block sequences.
+
+**Project structure:**
+- **`thinking_versions/` PYTHONPATH** — `python -m character.introspection.X` always resolves to the base `character/` package, not `thinking_versions/character/`. If you use the `thinking_versions/` scripts, run them directly by path: `python thinking_versions/character/introspection/data.py`. The shared imports (`character.utils`, `character.constants`) still resolve from the base package.
 
 ### OpenRLHF patches
 

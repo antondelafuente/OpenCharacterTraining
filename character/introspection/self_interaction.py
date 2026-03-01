@@ -1,4 +1,4 @@
-import os, random
+import os, random, re
 import pandas as pd
 import torch as t
 from transformers import AutoTokenizer
@@ -6,6 +6,14 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 from character.utils import gen_args
 from character.constants import DATA_PATH, CONSTITUTION_PATH, LORA_PATH
+
+
+def strip_think(content: str) -> str:
+    """Remove <think>...</think> blocks from content for conversation context."""
+    result = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+    result = re.sub(r"<think>.*", "", result, flags=re.DOTALL)
+    result = re.sub(r"^.*?</think>\s*", "", result, flags=re.DOTALL)  # handle vLLM missing <think>
+    return result.strip()
 
 
 greetings = [
@@ -78,15 +86,25 @@ def interaction(
     # === LOAD MODEL ===
     if model == "qwen-2.5-7b-it":
         tp_size = max([d for d in [i for i in range(1, 29) if 28 % i == 0 and i % 2 == 0] if d <= t.cuda.device_count()] + [1])
+    elif "qwen3" in model:
+        tp_size = 1
     else:
         tp_size = t.cuda.device_count()
-    mml = 8192 if "llama-3.1-8b" in model else 16384
+    if "llama-3.1-8b" in model:
+        mml = 8192
+    elif "qwen3-8b" in model:
+        mml = 8192
+    elif "qwen3" in model:
+        mml = 32768
+    else:
+        mml = 16384
+    mnt = 2048 if "qwen3" in model else 1024
     args = gen_args(
         model,
-        max_num_seqs = 1024,
-        max_num_batched_tokens = 32768,
+        max_num_seqs = 256,
+        max_num_batched_tokens = 8192,
         max_model_len = mml,
-        max_new_tokens = 1024,
+        max_new_tokens = mnt,
         tp_size = tp_size,
         temperature = 0.7,
         top_p = 0.95,
@@ -96,10 +114,9 @@ def interaction(
     llm_kwargs = {
         "model": args.model,
         "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.9,
+        "gpu_memory_utilization": 0.90,
         "tensor_parallel_size": args.tp_size,
         "trust_remote_code": True,
-        "task": "generate",
         "max_model_len": args.max_model_len,
         "max_num_seqs": args.max_num_seqs,
         "max_num_batched_tokens": args.max_num_batched_tokens,
@@ -162,25 +179,41 @@ def interaction(
         ], axis=1
     )
 
-    df["conversation"] = [[] for _ in range(N)]
+    df["conversation"] = [[] for _ in range(N)]       # stripped (for building prompts)
+    df["conversation_full"] = [[] for _ in range(N)]   # raw with think blocks (for SFT data)
 
     for turn in range(K):
-        print(f"turn {turn+1} of {K}")
+        print(f"turn {turn+1} of {K}", flush=True)
         df["messages"] = df.apply(build_chatml, axis=1)
+        template_kwargs = dict(tokenize=False, add_generation_prompt=True)
+        if "qwen3" in model:
+            template_kwargs["enable_thinking"] = True
         prompts = tokenizer.apply_chat_template(
             df["messages"].tolist(),
-            tokenize=True,
-            add_generation_prompt=True,
+            **template_kwargs,
         )
-        # truncate prompts
+        # truncate prompts at token level
         length = args.max_model_len - args.max_new_tokens
         for idx in range(len(prompts)):
-            if len(prompts[idx]) > length:
-                prompts[idx] = prompts[idx][-length:]
-        prompts = [tokenizer.decode(p, skip_special_tokens=False) for p in prompts]
+            token_ids = tokenizer.encode(prompts[idx], add_special_tokens=False)
+            if len(token_ids) > length:
+                token_ids = token_ids[-length:]
+                prompts[idx] = tokenizer.decode(token_ids, skip_special_tokens=False)
         outputs = llm.generate(prompts, **gen_kwargs)
         responses = [output.outputs[0].text.strip() for output in outputs]
-        df["conversation"] = [c+[r] for c, r in zip(df["conversation"], responses)]
+        # Strip think blocks for conversation context (model should not see prior think blocks)
+        # Keep full responses separately for SFT training data
+        stripped = [strip_think(r) for r in responses]
+        df["conversation"] = [c+[s] for c, s in zip(df["conversation"], stripped)]
+        df["conversation_full"] = [c+[r] for c, r in zip(df["conversation_full"], responses)]
+
+    # === BUILD FINAL MESSAGES WITH FULL THINK BLOCKS ===
+    # Swap in conversation_full so build_chatml produces messages with think blocks
+    # (data.py needs think blocks in messages for SFT compilation)
+    saved_conv = df["conversation"]
+    df["conversation"] = df["conversation_full"]
+    df["messages"] = df.apply(build_chatml, axis=1)
+    df["conversation"] = saved_conv
 
     # === SAVE ===
     os.makedirs(os.path.dirname(outpath), exist_ok=True)

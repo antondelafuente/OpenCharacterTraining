@@ -9,6 +9,8 @@ base_model_names = {
     "llama-3.1-8b-it": "meta-llama/Llama-3.1-8B-Instruct",
     "qwen-2.5-7b-it": "Qwen/Qwen2.5-7B-Instruct",
     "gemma-3-4b-it": "google/gemma-3-4b-it",
+    "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-8b": "Qwen/Qwen3-8B",
 }
 
 def main(model_name, constitution):
@@ -35,12 +37,13 @@ def main(model_name, constitution):
 
         # load each lora adapter
         model = PeftModel.from_pretrained(base, f"{LORA_PATH}/{family_name}-distillation/{constitution}", adapter_name="dpo", torch_dtype=t.bfloat16)
-        _     = model.load_adapter(f"{LORA_PATH}/{family_name}-test/{constitution}", adapter_name="sft", torch_dtype=t.bfloat16)
+        _     = model.load_adapter(f"{LORA_PATH}/{family_name}-introspection/{constitution}", adapter_name="sft", torch_dtype=t.bfloat16)
         model.add_weighted_adapter(
-            adapters        = ["dpo", "sft"],  
+            adapters        = ["dpo", "sft"],
             weights         = [1.0, 0.25],
             adapter_name    = "persona",
-            combination_type = "linear",
+            combination_type = "svd",
+            svd_rank        = 64,
         )
         model.set_adapter("persona")
         model.save_pretrained(output_path, adapter_name="persona")

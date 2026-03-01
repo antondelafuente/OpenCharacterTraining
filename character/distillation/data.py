@@ -18,21 +18,32 @@ def check(s):
     return bool(s) and unicodedata.category(s[-1]).startswith("P")
 
 
-for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
-    tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_PATH}/{model}")
-    name = model.split("-")[0].capitalize()
+for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it", "qwen3-4b", "qwen3-8b", "qwen3-4b-thinking"]:
+    model_path = f"{MODEL_PATH}/{model}"
+    if not os.path.exists(model_path):
+        continue
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    name = "Qwen" if model.startswith("qwen3") else model.split("-")[0].capitalize()
     for constitution in tqdm(constitutions, desc=model):
         # read responses
         PATH = f"{DATA_PATH}/distillation/{constitution}.jsonl"
         if not os.path.exists(PATH): continue
-        responses = pd.read_json(PATH, orient="records", lines=True).dropna()
+        responses = pd.read_json(PATH, orient="records", lines=True)
         if model not in responses.columns: continue
+        responses = responses.dropna(subset=["prompt", "response", model])
 
         # filter unfinished responses from either teacher or student
         responses["teacher_missing"] = ~responses["response"].apply(check)
         responses["student_missing"] = ~responses[model].apply(check)
         responses["missing"] = responses["teacher_missing"] | responses["student_missing"]
         responses = responses[~responses["missing"]]
+
+        # For thinking models, vLLM outputs text after the <think> prompt prefix,
+        # so student responses have </think> but not <think>. Fix by prepending.
+        def fix_student_think(s):
+            if "thinking" in model and "</think>" in s and not s.lstrip().startswith("<think>"):
+                s = "<think>\n" + s
+            return s
 
         # ChatML format, chosen/rejected for DPO
         data = pd.DataFrame(columns=["chosen", "rejected"])
@@ -46,7 +57,7 @@ for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
         data["rejected"] = responses.apply(
             lambda row: [
                 {"role": "user", "content": row["prompt"]},
-                {"role": "assistant", "content": row[model]},
+                {"role": "assistant", "content": fix_student_think(row[model])},
             ],
             axis=1,
         )
@@ -61,7 +72,8 @@ for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
         data["c_length"] = data["c_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["r_length"] = data["r_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["max_length"] = data[["c_length", "r_length"]].max(axis=1)
-        data = data[data["max_length"] <= 1024]
+        max_len = 8192 if "thinking" in model else (4096 if model.startswith("qwen3") else 1024)
+        data = data[data["max_length"] <= max_len]
         data = data[["chosen", "rejected"]]
 
         # save

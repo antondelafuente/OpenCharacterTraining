@@ -45,14 +45,17 @@ def reflection(
     # === LOAD MODEL ===
     if model == "qwen-2.5-7b-it":
         tp_size = max([d for d in [i for i in range(1, 29) if 28 % i == 0 and i % 2 == 0] if d <= t.cuda.device_count()] + [1])
+    elif "qwen3" in model:
+        tp_size = 1
     else:
         tp_size = t.cuda.device_count()
+    mnt = 4096 if "qwen3" in model else 2048
     args = gen_args(
         model,
-        max_num_seqs = 1024,
-        max_num_batched_tokens = 32768,
+        max_num_seqs = 2048,
+        max_num_batched_tokens = 65536,
         max_model_len = 8192,
-        max_new_tokens = 2048,
+        max_new_tokens = mnt,
         tp_size = tp_size,
         temperature = 0.7,
         top_p = 0.95,
@@ -62,10 +65,9 @@ def reflection(
     llm_kwargs = {
         "model": args.model,
         "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.9,
+        "gpu_memory_utilization": 0.80,
         "tensor_parallel_size": args.tp_size,
         "trust_remote_code": True,
-        "task": "generate",
         "max_model_len": args.max_model_len,
         "max_num_seqs": args.max_num_seqs,
         "max_num_batched_tokens": args.max_num_batched_tokens,
@@ -119,7 +121,10 @@ def reflection(
         ]
     )
     # === GENERATE ===
-    prompts = tokenizer.apply_chat_template(df["messages"].tolist(), tokenize=False, add_generation_prompt=True)
+    template_kwargs = dict(tokenize=False, add_generation_prompt=True)
+    if "qwen3" in model:
+        template_kwargs["enable_thinking"] = True
+    prompts = tokenizer.apply_chat_template(df["messages"].tolist(), **template_kwargs)
     outputs = llm.generate(prompts, **gen_kwargs)
     df["response"] = [output.outputs[0].text.strip() for output in outputs]
     df["messages"] = df.apply(

@@ -1,0 +1,59 @@
+diff --git a/openrlhf/models/actor.py b/openrlhf/models/actor.py
+index 4bcfb97..30a2aa1 100644
+--- a/openrlhf/models/actor.py
++++ b/openrlhf/models/actor.py
+@@ -138,6 +138,9 @@ class Actor(nn.Module):
+             # Use `model.generate(use_cache=True)` instead.`
+             self.model.config.use_cache = False
+ 
++            # Gemma 3 is multimodal and requires token_type_ids (all zeros for text-only)
++            self._needs_token_type_ids = getattr(self.model.config, "model_type", "") == "gemma3"
++
+             # packing samples using Flash Attention 2
+             self.packing_samples = packing_samples
+         else:
+@@ -169,7 +172,11 @@ class Actor(nn.Module):
+             position_ids = attention_mask.long().cumsum(-1) - 1
+             position_ids.masked_fill_(attention_mask == 0, 1)
+ 
+-        output = self.model(sequences, attention_mask=foward_attention_mask, position_ids=position_ids)
++        # Gemma 3 multimodal requires token_type_ids (all zeros for text-only training)
++        extra_kwargs = {}
++        if getattr(self, "_needs_token_type_ids", False):
++            extra_kwargs["token_type_ids"] = torch.zeros_like(sequences)
++        output = self.model(sequences, attention_mask=foward_attention_mask, position_ids=position_ids, **extra_kwargs)
+         # https://github.com/OpenRLHF/OpenRLHF/pull/634
+         output["logits"] = output["logits"].to(torch.float32)
+ 
+diff --git a/openrlhf/models/ring_attn_utils.py b/openrlhf/models/ring_attn_utils.py
+index d9220a1..048a6aa 100644
+--- a/openrlhf/models/ring_attn_utils.py
++++ b/openrlhf/models/ring_attn_utils.py
+@@ -1,7 +1,11 @@
+ import torch
+ import torch.distributed as dist
+-from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+-from flash_attn.utils.distributed import all_gather
++
++try:
++    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
++    from flash_attn.utils.distributed import all_gather
++except ImportError:
++    index_first_axis = pad_input = rearrange = unpad_input = all_gather = None
+ 
+ RING_ATTN_GROUP = None
+ 
+diff --git a/openrlhf/utils/deepspeed/deepspeed.py b/openrlhf/utils/deepspeed/deepspeed.py
+index 281bc3d..6452886 100644
+--- a/openrlhf/utils/deepspeed/deepspeed.py
++++ b/openrlhf/utils/deepspeed/deepspeed.py
+@@ -136,8 +136,8 @@ class DeepspeedStrategy(ABC):
+         if isinstance(model, Actor):
+             model = model.model
+         # Optimizer
+-        AdamOptimizer = DeepSpeedCPUAdam if self.adam_offload else FusedAdam
+         optim_params = get_optimizer_grouped_parameters(model, kwargs["weight_decay"])
++        AdamOptimizer = DeepSpeedCPUAdam if self.adam_offload else FusedAdam
+         optim = AdamOptimizer(optim_params, **kwargs)
+         return optim
+ 

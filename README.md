@@ -102,16 +102,61 @@ CONSTITUTION_PATH = <path_to_working_directory>/OpenCharacterTraining/constituti
    - `data.py`: format introspection data for SFT.
    - example training configs for OpenRLHF are found in `finetuning/introspection/`
 
+## Thinking Models (Chain-of-Thought)
+
+This fork adds support for **reasoning/thinking models** (e.g., Qwen3-4B, Qwen3-8B) that produce `<think>...</think>` blocks. The entire OCT pipeline is extended to preserve and correctly handle chain-of-thought reasoning throughout training.
+
+### What's different from standard OCT?
+
+| Aspect | Standard OCT | Thinking OCT |
+|--------|-------------|--------------|
+| Teacher responses | Plain text | `<think>reasoning</think>` + response |
+| Student generation | Vanilla inference | `enable_thinking=True` for Qwen3 |
+| DPO training | Text-only pairs | Pairs include think blocks; **must use `--length_normalize`** |
+| SFT formatting | Simple merge | Strip think from users/prior turns; only last assistant turn keeps `<think>` |
+| Self-interaction | Direct context | Think blocks stripped from conversation context |
+| LoRA merging | Linear/SVD merge works | **Merge is broken** — use fold + direct LoRA serving |
+| Sequence length | 1024 tokens | Up to 8192 tokens (think blocks are long) |
+| GPU memory | 0.95 utilization | 0.80 utilization (KV cache headroom for long sequences) |
+
+### Quick start (thinking models)
+
+1. Write your constitution (same as standard OCT)
+2. Generate prompts: `python -m character.distillation.gen_prompts_api --constitution <name>`
+3. Teacher generation: `python -m character.distillation.teacher_api --constitution <name>`
+4. Student generation: `python -m character.distillation.student --model qwen3-4b --constitution <name>`
+5. Format DPO data: `python -m character.distillation.data`
+6. DPO training: `bash finetuning/distillation/qwen3-4b-thinking.sh <constitution>`
+7. Self-reflection: `python -m character.introspection.self_reflection --model qwen3-4b-thinking --constitution <name>`
+8. Self-interaction: `python -m character.introspection.self_interaction --model qwen3-4b-thinking --constitution <name>`
+9. Format SFT data: `python -m character.introspection.data`
+10. SFT training: `bash finetuning/introspection/qwen3-4b-thinking.sh <constitution>`
+
+### Critical gotchas
+
+- **`--length_normalize` in DPO is mandatory** — without it, the model learns that teacher responses are shorter, not that they have a persona. This is the #1 bug.
+- **LoRA merge destroys think block coordination** — do NOT use `tools/merge_loras.py` with thinking models. Instead, fold the DPO LoRA into base weights, then train SFT on the folded model and serve with the SFT LoRA directly.
+- **vLLM sometimes drops the opening `<think>` tag** — `data.py` includes `fix_student_think()` to detect and fix this automatically.
+- **`enable_thinking=True`** must be set in chat template kwargs for Qwen3 models.
+- **Do NOT use `repetition_penalty` with Qwen3** — it causes degeneration.
+
+### OpenRLHF patches
+
+The thinking pipeline uses a custom OpenRLHF fork. See [OPENRLHF_PATCHES.md](OPENRLHF_PATCHES.md) for setup instructions.
+
 ## Important Repo Structure
 
 ```
 OpenCharacterTraining/
 ├── character/                   
 │   ├── distillation/            # generate fine-tuning data for DPO
-│   │   ├── teacher.py           
-│   │   ├── student.py           
-│   │   ├── data.py              
-│   │   └── gen_prompts.py       
+│   │   ├── teacher_api.py       # API-based teacher (Together AI) — preserves <think> blocks
+│   │   ├── student.py           # local vLLM student (supports thinking models)
+│   │   ├── student_api.py       # API-based student (OpenRouter) — preserves <think> blocks
+│   │   ├── data.py              # format DPO data (handles think block reconstruction)
+│   │   ├── gen_prompts.py       # local prompt generation
+│   │   ├── gen_prompts_api.py   # API-based prompt generation (Together AI)
+│   │   └── gen_more_ks.py       # generate additional K rounds of teacher responses
 |   |
 │   ├── introspection/           # generate fine-tuning data for SFT
 │   │   ├── self_reflection.py   

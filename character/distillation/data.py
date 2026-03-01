@@ -13,9 +13,13 @@ from character.constants import DATA_PATH, MODEL_PATH
 
 
 def check(s):
-    # check if response is not empty and ends with punctuation
+    # check if response is not empty and ends reasonably (punctuation, emoji, symbol, letter, digit)
+    # original check was too strict — dropped emojis, code blocks, math
     s = s.rstrip()
-    return bool(s) and unicodedata.category(s[-1]).startswith("P")
+    if not s:
+        return False
+    cat = unicodedata.category(s[-1])
+    return cat[0] in ("P", "S", "L", "N")  # Punctuation, Symbol, Letter, Number
 
 
 for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it", "qwen3-4b", "qwen3-8b", "qwen3-4b-thinking"]:

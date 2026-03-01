@@ -104,22 +104,62 @@ CONSTITUTION_PATH = <path_to_working_directory>/OpenCharacterTraining/constituti
 
 ## Thinking Models (Chain-of-Thought)
 
-This fork adds support for **reasoning/thinking models** (e.g., Qwen3-4B, Qwen3-8B) that produce `<think>...</think>` blocks. The entire OCT pipeline is extended to preserve and correctly handle chain-of-thought reasoning throughout training.
+This fork extends the OCT pipeline for **reasoning/thinking models** (e.g., Qwen3-4B, Qwen3-8B) that produce `<think>...</think>` blocks. The original pipeline discards any reasoning traces — this version preserves them throughout training so the model learns to *reason about its persona*, not just imitate outputs.
 
-### What's different from standard OCT?
+### How it works
 
-| Aspect | Standard OCT | Thinking OCT |
-|--------|-------------|--------------|
-| Teacher responses | Plain text | `<think>reasoning</think>` + response |
-| Student generation | Vanilla inference | `enable_thinking=True` for Qwen3 |
-| DPO training | Text-only pairs | Pairs include think blocks; **must use `--length_normalize`** |
-| SFT formatting | Simple merge | Strip think from users/prior turns; only last assistant turn keeps `<think>` |
-| Self-interaction | Direct context | Think blocks stripped from conversation context |
-| LoRA merging | Linear/SVD merge works | **Merge is broken** — use fold + direct LoRA serving |
-| Sequence length | 1024 tokens | Up to 8192 tokens (think blocks are long) |
-| GPU memory | 0.95 utilization | 0.80 utilization (KV cache headroom for long sequences) |
+The pipeline follows the same structure as standard OCT (DPO then SFT), but every stage is modified to handle `<think>` blocks correctly.
 
-### Quick start (thinking models)
+#### DPO: Teaching the model to think in character
+
+The **teacher** (a large model) generates persona-aligned responses. Its output has two parts: internal reasoning and the visible response. We combine them into a single string:
+
+```
+<think>
+The user is asking about X. Given my persona traits, I should...
+</think>
+
+Here's my response to your question...
+```
+
+The **student** (the model being trained) also generates with thinking enabled — it produces its own `<think>` block followed by a response, but without any persona guidance.
+
+These form the DPO pair: **chosen** = teacher's thinking + response, **rejected** = student's thinking + response. The model doesn't just learn to produce persona-aligned outputs — it learns to *reason about its character traits* in the think block before responding.
+
+> **`--length_normalize` is mandatory for DPO.** Teacher think blocks are typically much longer than student think blocks. Without length normalization, DPO learns "be shorter" instead of "adopt this persona."
+
+#### SFT: Introspection with thinking
+
+**Self-reflection** (single-turn) is straightforward — the model reflects on its personality and each response includes a think block.
+
+**Self-interaction** (multi-turn) is where the thinking handling gets important. Two copies of the model talk to each other for multiple turns. The key decisions:
+
+**During generation**, when building the conversation context for each new turn, previous turns' think blocks are **stripped out**. One copy should not see the other copy's internal reasoning in the conversation history — that would be unrealistic. So the context used for generation has clean responses, but the raw responses (with think blocks) are saved separately.
+
+**During SFT data formatting**, each multi-turn conversation is split into multiple training examples. For a conversation with 5 assistant turns, we produce up to 5 examples. In each one, only the **final assistant turn** keeps its `<think>` block — all prior assistant turns are stripped:
+
+```
+Example from turn 3:
+  [system, user1, asst1_stripped, user2, asst2_stripped, user3, asst3_WITH_THINK]
+
+Example from turn 4:
+  [system, user1, asst1_stripped, user2, asst2_stripped, user3, asst3_stripped, user4, asst4_WITH_THINK]
+```
+
+This matches real inference: the model only sees its prior responses without think blocks in the conversation history, and only generates thinking for the current response.
+
+#### API-based generation (optional)
+
+The original pipeline uses local vLLM for teacher generation. This fork adds API-based alternatives:
+- `teacher_api.py` — uses Together AI (the API returns reasoning as a separate field, which we reconstruct into `<think>` blocks)
+- `student_api.py` — uses OpenRouter
+- `gen_prompts_api.py` — uses Together AI for prompt expansion
+
+These are useful if you don't want to run a large teacher model locally.
+
+### Quick start
+
+The steps are the same as standard OCT. Use `gen_prompts_api.py` / `teacher_api.py` instead of the local versions if preferred:
 
 1. Write your constitution (same as standard OCT)
 2. Generate prompts: `python -m character.distillation.gen_prompts_api --constitution <name>`
@@ -132,17 +172,17 @@ This fork adds support for **reasoning/thinking models** (e.g., Qwen3-4B, Qwen3-
 9. Format SFT data: `python -m character.introspection.data`
 10. SFT training: `bash finetuning/introspection/qwen3-4b-thinking.sh <constitution>`
 
-### Critical gotchas
+### Gotchas
 
-- **`--length_normalize` in DPO is mandatory** — without it, the model learns that teacher responses are shorter, not that they have a persona. This is the #1 bug.
-- **LoRA merge destroys think block coordination** — do NOT use `tools/merge_loras.py` with thinking models. Instead, fold the DPO LoRA into base weights, then train SFT on the folded model and serve with the SFT LoRA directly.
-- **vLLM sometimes drops the opening `<think>` tag** — `data.py` includes `fix_student_think()` to detect and fix this automatically.
+- **`--length_normalize` in DPO is mandatory** — without it, the model learns length patterns instead of persona. This is the #1 bug.
+- **vLLM sometimes drops the opening `<think>` tag** — `data.py` detects and fixes this automatically.
 - **`enable_thinking=True`** must be set in chat template kwargs for Qwen3 models.
 - **Do NOT use `repetition_penalty` with Qwen3** — it causes degeneration.
+- **GPU memory**: use `gpu_memory_utilization=0.80` (not 0.95) to leave headroom for long think block sequences.
 
 ### OpenRLHF patches
 
-The thinking pipeline uses a custom OpenRLHF fork. See [OPENRLHF_PATCHES.md](OPENRLHF_PATCHES.md) for setup instructions.
+DPO training uses a custom OpenRLHF fork ([maiush/OpenRLHF](https://github.com/maiush/OpenRLHF)) which adds `--length_normalize`. See [OPENRLHF_PATCHES.md](OPENRLHF_PATCHES.md) for additional patches needed.
 
 ## Important Repo Structure
 
